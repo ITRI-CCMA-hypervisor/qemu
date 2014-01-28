@@ -756,6 +756,7 @@ static void virtio_blk_device_unrealize(DeviceState *dev, Error **errp)
 
 static Property virtio_blk_properties[] = {
     DEFINE_VIRTIO_BLK_PROPERTIES(VirtIOBlock, blk),
+    DEFINE_PROP_BOOL("ioeventfd", VirtIOBlock, parent_obj.use_ioeventfd, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

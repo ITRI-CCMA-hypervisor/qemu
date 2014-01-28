@@ -1631,6 +1631,7 @@ static Property virtio_net_properties[] = {
                                                TX_TIMER_INTERVAL),
     DEFINE_PROP_INT32("x-txburst", VirtIONet, net_conf.txburst, TX_BURST),
     DEFINE_PROP_STRING("tx", VirtIONet, net_conf.tx),
+    DEFINE_PROP_BOOL("ioeventfd", VirtIONet, parent_obj.use_ioeventfd, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

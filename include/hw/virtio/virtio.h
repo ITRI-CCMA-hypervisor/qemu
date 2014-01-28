@@ -121,6 +121,7 @@ struct VirtIODevice
     bool vm_running;
     VMChangeStateEntry *vmstate;
     char *bus_name;
+    bool use_ioeventfd;
 };
 
 typedef struct VirtioDeviceClass {

@@ -127,7 +127,8 @@ static void virtio_mmio_start_ioeventfd(VirtIOMMIOProxy *proxy)
     VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
     int n, r;
 
-    if (proxy->ioeventfd_disabled ||
+    if (!vdev->use_ioeventfd ||
+        proxy->ioeventfd_disabled ||
         proxy->ioeventfd_started) {
         return;
     }
