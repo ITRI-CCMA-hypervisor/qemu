@@ -396,6 +396,65 @@ static void virtio_mmio_reset(DeviceState *d)
     proxy->guest_page_shift = 0;
 }
 
+static int virtio_mmio_set_guest_notifier(DeviceState *d, int n, bool assign,
+                                         bool with_irqfd)
+{
+    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(d);
+    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
+    VirtQueue *vq = virtio_get_queue(vdev, n);
+    EventNotifier *notifier = virtio_queue_get_guest_notifier(vq);
+
+    if (assign) {
+        int r = event_notifier_init(notifier, 0);
+        if (r < 0) {
+            return r;
+        }
+        virtio_queue_set_guest_notifier_fd_handler(vq, true, with_irqfd);
+    } else {
+        virtio_queue_set_guest_notifier_fd_handler(vq, false, with_irqfd);
+        event_notifier_cleanup(notifier);
+    }
+
+    if (vdc->guest_notifier_mask) {
+        vdc->guest_notifier_mask(vdev, n, !assign);
+    }
+
+    return 0;
+}
+
+static int virtio_mmio_set_guest_notifiers(DeviceState *d, int nvqs, bool assign)
+{
+    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(d);
+    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    /* FIXME: need to check if kvm-arm supports irqfd */
+    bool with_irqfd = false;
+    int r, n;
+
+    nvqs = MIN(nvqs, VIRTIO_PCI_QUEUE_MAX);
+
+    for (n = 0; n < nvqs; n++) {
+        if (!virtio_queue_get_num(vdev, n)) {
+            break;
+        }
+
+        r = virtio_mmio_set_guest_notifier(d, n, assign, with_irqfd);
+        if (r < 0) {
+            goto assign_error;
+        }
+    }
+
+    return 0;
+
+assign_error:
+    /* We get here on assignment failure. Recover by undoing for VQs 0 .. n. */
+    assert(assign);
+    while (--n >= 0) {
+        virtio_mmio_set_guest_notifier(d, n, !assign, false);
+    }
+    return r;
+}
+
 static int virtio_mmio_set_host_notifier(DeviceState *opaque, int n, bool assign)
 {
     VirtIOMMIOProxy *proxy = VIRTIO_MMIO(opaque);
@@ -476,6 +535,7 @@ static void virtio_mmio_bus_class_init(ObjectClass *klass, void *data)
     k->save_config = virtio_mmio_save_config;
     k->load_config = virtio_mmio_load_config;
     k->set_host_notifier = virtio_mmio_set_host_notifier;
+    k->set_guest_notifiers = virtio_mmio_set_guest_notifiers;
     k->get_features = virtio_mmio_get_features;
     k->device_plugged = virtio_mmio_device_plugged;
     k->has_variable_vring_alignment = true;
