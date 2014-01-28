@@ -122,6 +122,42 @@ static int virtio_mmio_set_host_notifier_internal(VirtIOMMIOProxy *proxy,
     return r;
 }
 
+static void virtio_mmio_start_ioeventfd(VirtIOMMIOProxy *proxy)
+{
+    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    int n, r;
+
+    if (proxy->ioeventfd_disabled ||
+        proxy->ioeventfd_started) {
+        return;
+    }
+
+    for (n = 0; n < VIRTIO_PCI_QUEUE_MAX; n++) {
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+
+        r = virtio_mmio_set_host_notifier_internal(proxy, n, true, true);
+        if (r < 0) {
+            goto assign_error;
+        }
+    }
+    proxy->ioeventfd_started = true;
+    return;
+
+assign_error:
+    while (--n >= 0) {
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+
+        r = virtio_mmio_set_host_notifier_internal(proxy, n, false, false);
+        assert(r >= 0);
+    }
+    proxy->ioeventfd_started = false;
+    error_report("%s: failed. Fallback to a userspace (slower).", __func__);
+}
+
 static void virtio_mmio_stop_ioeventfd(VirtIOMMIOProxy *proxy)
 {
     int r;
@@ -320,7 +356,16 @@ static void virtio_mmio_write(void *opaque, hwaddr offset, uint64_t value,
         virtio_update_irq(vdev);
         break;
     case VIRTIO_MMIO_STATUS:
+        if (!(value & VIRTIO_CONFIG_S_DRIVER_OK)) {
+            virtio_mmio_stop_ioeventfd(proxy);
+        }
+
         virtio_set_status(vdev, value & 0xff);
+
+        if (value & VIRTIO_CONFIG_S_DRIVER_OK) {
+            virtio_mmio_start_ioeventfd(proxy);
+        }
+
         if (vdev->status == 0) {
             virtio_reset(vdev);
         }
