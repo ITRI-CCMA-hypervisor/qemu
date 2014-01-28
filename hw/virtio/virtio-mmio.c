@@ -23,6 +23,7 @@
 #include "hw/virtio/virtio.h"
 #include "qemu/host-utils.h"
 #include "hw/virtio/virtio-bus.h"
+#include "qemu/error-report.h"
 
 /* #define DEBUG_VIRTIO_MMIO */
 
@@ -87,10 +88,60 @@ typedef struct {
     uint32_t guest_page_shift;
     /* virtio-bus */
     VirtioBusState bus;
+    bool ioeventfd_disabled;
+    bool ioeventfd_started;
 } VirtIOMMIOProxy;
 
 static void virtio_mmio_bus_new(VirtioBusState *bus, size_t bus_size,
                                 VirtIOMMIOProxy *dev);
+
+static int virtio_mmio_set_host_notifier_internal(VirtIOMMIOProxy *proxy,
+                                                 int n, bool assign, bool set_handler)
+{
+    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+    VirtQueue *vq = virtio_get_queue(vdev, n);
+    EventNotifier *notifier = virtio_queue_get_host_notifier(vq);
+    int r = 0;
+
+    if (assign) {
+        r = event_notifier_init(notifier, 1);
+        if (r < 0) {
+            error_report("%s: unable to init event notifier: %d",
+                         __func__, r);
+            return r;
+        }
+        virtio_queue_set_host_notifier_fd_handler(vq, true, set_handler);
+        memory_region_add_eventfd(&proxy->iomem, VIRTIO_MMIO_QUEUENOTIFY, 4,
+                                  true, n, notifier);
+    } else {
+        memory_region_del_eventfd(&proxy->iomem, VIRTIO_MMIO_QUEUENOTIFY, 4,
+                                  true, n, notifier);
+        virtio_queue_set_host_notifier_fd_handler(vq, false, false);
+        event_notifier_cleanup(notifier);
+    }
+    return r;
+}
+
+static void virtio_mmio_stop_ioeventfd(VirtIOMMIOProxy *proxy)
+{
+    int r;
+    int n;
+    VirtIODevice *vdev = virtio_bus_get_device(&proxy->bus);
+
+    if (!proxy->ioeventfd_started) {
+        return;
+    }
+
+    for (n = 0; n < VIRTIO_PCI_QUEUE_MAX; n++) {
+        if (!virtio_queue_get_num(vdev, n)) {
+            continue;
+        }
+
+        r = virtio_mmio_set_host_notifier_internal(proxy, n, false, false);
+        assert(r >= 0);
+    }
+    proxy->ioeventfd_started = false;
+}
 
 static uint64_t virtio_mmio_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -345,6 +396,24 @@ static void virtio_mmio_reset(DeviceState *d)
     proxy->guest_page_shift = 0;
 }
 
+static int virtio_mmio_set_host_notifier(DeviceState *opaque, int n, bool assign)
+{
+    VirtIOMMIOProxy *proxy = VIRTIO_MMIO(opaque);
+
+    /* Stop using ioeventfd for virtqueue kick if the device starts using host
+     * notifiers.  This makes it easy to avoid stepping on each others' toes.
+     */
+    proxy->ioeventfd_disabled = assign;
+    if (assign) {
+        virtio_mmio_stop_ioeventfd(proxy);
+    }
+    /* We don't need to start here: it's not needed because backend
+     * currently only stops on status change away from ok,
+     * reset, vmstop and such. If we do add code to start here,
+     * need to check vmstate, device state etc. */
+    return virtio_mmio_set_host_notifier_internal(proxy, n, assign, false);
+}
+
 /* virtio-mmio device */
 
 /* This is called by virtio-bus just after the device is plugged. */
@@ -406,6 +475,7 @@ static void virtio_mmio_bus_class_init(ObjectClass *klass, void *data)
     k->notify = virtio_mmio_update_irq;
     k->save_config = virtio_mmio_save_config;
     k->load_config = virtio_mmio_load_config;
+    k->set_host_notifier = virtio_mmio_set_host_notifier;
     k->get_features = virtio_mmio_get_features;
     k->device_plugged = virtio_mmio_device_plugged;
     k->has_variable_vring_alignment = true;
